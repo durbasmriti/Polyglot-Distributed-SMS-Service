@@ -3,27 +3,38 @@ package consumer
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/durbasmriti/Polyglot-Distributed-SMS-Service/sms-storage/model"
-	"github.com/durbasmriti/Polyglot-Distributed-SMS-Service/sms-storage/repository"
 	"github.com/segmentio/kafka-go"
 )
 
+type MessageReader interface {
+	ReadMessage(ctx context.Context) (kafka.Message, error)
+	Close() error
+}
+
+type SmsRepository interface {
+	Save(event model.SmsEvent) error
+}
+
 type KafkaConsumer struct {
-	reader     *kafka.Reader
-	repository *repository.SmsRepository
+	reader     MessageReader
+	repository SmsRepository
 }
 
 func NewKafkaConsumer(
-	repo *repository.SmsRepository,
+	repo SmsRepository,
+	brokers []string,
+	topic string,
+	groupID string,
 ) *KafkaConsumer {
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{"localhost:9092"},
-		Topic:   "sms-events",
-		GroupID: "sms-storage-group",
+		Brokers: brokers,
+		Topic:   topic,
+		GroupID: groupID,
 	})
 
 	return &KafkaConsumer{
@@ -32,24 +43,30 @@ func NewKafkaConsumer(
 	}
 }
 
-func (c *KafkaConsumer) Start() {
+func (c *KafkaConsumer) Start(ctx context.Context) {
 
 	defer c.reader.Close()
 
-	log.Println("Kafka consumer started")
-	log.Println("Waiting for SMS events...")
+	slog.Info("Kafka consumer started")
+	slog.Info("Waiting for SMS events")
 
 	for {
 
-		message, err := c.reader.ReadMessage(
-			context.Background(),
-		)
+		message, err := c.reader.ReadMessage(ctx)
 
 		if err != nil {
-			log.Printf(
-				"Error reading Kafka message: %v",
-				err,
+
+			// Check whether the application is shutting down
+			if ctx.Err() != nil {
+				slog.Info("Kafka consumer stopping")
+				return
+			}
+
+			slog.Error(
+				"Failed to read Kafka message",
+				"error", err,
 			)
+
 			continue
 		}
 
@@ -60,9 +77,11 @@ func (c *KafkaConsumer) Start() {
 			&event,
 		); err != nil {
 
-			log.Printf(
-				"Error parsing SMS event: %v",
-				err,
+			slog.Error(
+				"Failed to parse SMS event",
+				"error", err,
+				"partition", message.Partition,
+				"offset", message.Offset,
 			)
 
 			continue
@@ -72,17 +91,19 @@ func (c *KafkaConsumer) Start() {
 
 		if err := c.repository.Save(event); err != nil {
 
-			log.Printf(
-				"Error saving SMS event: %v",
-				err,
+			slog.Error(
+				"Failed to save SMS event",
+				"error", err,
+				"userId", event.UserID,
 			)
 
 			continue
 		}
 
-		log.Printf(
-			"SMS event saved for user: %s",
-			event.UserID,
+		slog.Info(
+			"SMS event saved",
+			"userId", event.UserID,
+			"status", event.Status,
 		)
 	}
 }
